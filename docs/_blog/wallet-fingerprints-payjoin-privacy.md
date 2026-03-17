@@ -9,26 +9,30 @@ tags:
   - research
 ---
 
-Every wallet is a piece of software with habits, and habits leave fingerprints. When a wallet constructs a transaction it makes dozens of small decisions: input ordering, locktime value, coin selection strategy, fee rate, signature encoding. These choices vary systematically across implementations (Bitcoin Core behaves differently from Trezor, which behaves differently from Ledger). Some wallets have bugs that can also manifest as fingerprints.
+Every wallet is a piece of software with habits, and habits leave fingerprints. When a wallet constructs a transaction it makes dozens of small decisions: input ordering, locktime value, coin selection strategy, fee rate, signature encoding. These choices vary systematically across implementations (Bitcoin Core behaves differently from Trezor, which behaves differently from Ledger).
 
-Some signals are deterministic: Bitcoin Core grinds all ECDSA signatures to a short r-value (low-R), so [a single 72-byte signature immediately eliminates Core as the signer](https://b10c.me/blog/006-evolution-of-the-bitcoin-signature-length/#der-encoded-ecdsa-signatures). Others are probabilistic: fee rates follow characteristic distributions per wallet. Each observable dimension contributes an independent piece of evidence that accumulates multiplicatively.
+Some signals are deterministic: Bitcoin Core grinds all ECDSA signatures to a short r-value (low-R), so [a single 72-byte signature immediately eliminates Core as the signer](https://b10c.me/blog/006-evolution-of-the-bitcoin-signature-length/#der-encoded-ecdsa-signatures). Others are probabilistic: fee rates follow characteristic distributions per wallet. Some wallets have unintentional bugs that can also manifest as fingerprints. Each observable dimension contributes an independent piece of evidence that accumulates multiplicatively.
 
-## Intra vs. Inter: Two Levels of Linkage
+Once a fingerprint is identified, it can be used to [trivially guess the originating wallet](https://ishaana.com/blog/wallet_fingerprinting/) of a given transaction, and ultimately lead to learning private information about the participants in that transaction. This has significant implications for collaborative transaction protocols such as PayJoin.
 
-**Intra-transaction** signals operate within a single transaction. The goal is to partition inputs and outputs by owner: which outputs are change (returned to sender), which are payments (sent to receiver)? Address type homogeneity, round-value outputs, coin selection residuals, and signature encoding are the primary signals. Correct change identification is critical because it connects the sender's current transaction to their next one, extending their cluster forward in time.
+## Two Levels of Linkage
 
-**Inter-transaction** signals operate across the transaction graph.
+**Intra-transaction** signals operate within a single transaction. The goal is to partition inputs and outputs by owner: which outputs in this transaction are change (returned to sender) and which are payments (sent to receiver)? Correct change identification is critical because it connects the sender's current transaction to their next one.
 
-A PayJoin transaction with no intra-transaction fingerprints is a hidden node in a chain. Privacy is preserved at that node. Ideally it leads to false positives as an analyst would apply standard heuristics to the transaction. But the analyst has two flanking observation channels:
+**Inter-transaction** signals operate across the transaction graph:
+- **Backward:** Each input was created by some prior transaction that may carry a wallet fingerprint
+- **Forward:** Each output will eventually be spent in some future transaction that may also carry a fingerprint
 
-- **Backward:** Each input was created by some prior transaction that carries a wallet fingerprint
-- **Forward:** Each output will eventually be spent in some future transaction that also carries a fingerprint
+A PayJoin transaction with no intra-transaction fingerprints is a hidden node in a chain. Privacy is preserved at that node. Ideally it leads to false positives as an analyst would apply standard heuristics to the transaction.
 
-If sender and receiver use different wallet software, the fingerprints on either side of the PayJoin tell you which inputs and outputs belong to whom. You're inferring a hidden partition from observable boundary conditions.
+But if sender and receiver use different wallet software, the fingerprints on either side of the PayJoin may tell you which inputs and outputs belong to whom.
 
-The value conservation constraint tightens this further: inputs and outputs must balance per owner, so high-confidence labels on most variables often uniquely determine the remaining ambiguous ones. Once you've inferred the ownership partition, standard common input ownership heuristic (CIOH) clustering applies within each owner's inputs. In other words, the PayJoin collapses back into a pair of regular transactions.
+Once you've inferred the ownership partition, standard Common Input Ownership Heuristic (CIOH) clustering applies within each owner's inputs. In other words, the PayJoin collapses back into a pair of regular transactions.
 
-The goal of chain analysis against a PayJoin is therefore: (1) detect the collaborative transaction, (2) recover the sender/receiver input partition, (3) apply standard heuristics within each partition. Wallet fingerprints and collaboration artifacts like the [Unnecessary Input Heuristic (UIH)](https://eprint.iacr.org/2022/589.pdf) are exactly the signals that enable step 2.
+The goal of chain analysis against a PayJoin is therefore:
+1. Detect the collaborative transaction.
+2. Recover the sender/receiver input and output partition, using both intra- and inter-transaction signals.
+3. Apply standard heuristics within each partition.
 
 ## Example 1: Ashigaru PayJoin
 
@@ -82,21 +86,37 @@ The inter-transaction layer then re-affirms the input partitioning analysis. The
 The prior transaction for **input 1** ([`3fbe1713...`](https://mempool.bullbitcoin.com/tx/3fbe17132477ae6e38709b5e8e12ff5054fc66b4dd03568fea92a7a5bac18a84#vout=1)) uses only `nSequence::MAX` across all inputs. This is consistent with Bull Bitcoin Mobile's standard behavior, confirming this UTXO belongs to the receiver.
 
 ```
-PRIOR TX (9ecd77...)          PRIOR TX (3fbe17...)
-──────────────────────        ──────────────────────
-in_0 [seq=1  ]                in_0 [seq=∞]
-in_1 [seq=∞  ]                in_1 [seq=∞]
-                                                        PAYJOIN TX (8fb805...)
-out_0: 204,326                out_0: 430,856           ──────────────────────
-out_1: 440,337 ───────────────────────────────────────► in_0 [seq=1]
-                              out_1:  19,358 ──────────► in_1 [seq=1]
-
-                                                         out_0:  29,358
-                                                         out_1: 429,919
+┌──────────────────────────┐
+│ PRIOR TX (9ecd77...)     │
+│                          │
+│ in_0 [seq=1]             │
+│ in_1 [seq=∞]             │
+│ ──────────────────────── │
+│ out_0: 204,326           │
+│ out_1: 440,337 ──────────────────┐
+└──────────────────────────┘       │
+                                   │   ┌──────────────────────────┐
+                                   │   │ PAYJOIN TX (8fb805...)   │
+                                   │   │ ──────────────────────── │
+                                   └──►│ in_0 [seq=1]             │
+                                   ┌──►│ in_1 [seq=1]             │
+┌──────────────────────────┐       │   │ ──────────────────────── │
+│ PRIOR TX (3fbe17...)     │       │   │ out_0:  29,358           │
+│                          │       │   │ out_1: 429,919           │
+│ in_0 [seq=∞]             │       │   └──────────────────────────┘
+│ in_1 [seq=∞]             │       │
+│ ──────────────────────── │       │
+│ out_0: 430,856           │       │
+│ out_1:  19,358 ──────────────────┘
+└──────────────────────────┘
 ```
 
 The nSequence = `0x01` fingerprint is persistent across both transactions, carried by the same wallet through the spending chain. The backward channel propagates the party identity from the prior transaction into the PayJoin, collapsing the ownership partition. What appeared ambiguous from the PayJoin alone becomes fully determined once the input provenance is traced one hop back.
 
 ## Conclusions
 
-The lesson is not that PayJoin is broken. It is that PayJoin's privacy extends only as far as the uniformity of the participating wallets. Fingerprint uniformity at the transaction level is necessary but not sufficient. Any dimension on which the sender and receiver diverge becomes a partition signal. The analyst's job reduces to finding those divergences, and the transaction graph provides arbitrarily many observations to find them in.
+These observations teach us that PayJoin's privacy preservation extends only as far as the uniformity of the participating wallets. Fingerprint uniformity at the transaction level is necessary but not sufficient. Any dimension on which the sender and receiver diverge becomes a partition signal. The analyst's job reduces to finding those divergences in wallet behaviors, and the transaction graph provides arbitrarily many observations to find them in.
+
+While some of these wallet fingerprints are relatively [trivial to eliminate](https://github.com/cake-tech/cake_wallet/pull/3077), others are intrinsic to a particular wallet's design choices and goals and can't just be "fixed".
+
+Future work would entail modeling this entire process, systematizing the monitoring and detection of fingerprints in popular open-source wallets, and fixing low-hanging fruit where possible.
